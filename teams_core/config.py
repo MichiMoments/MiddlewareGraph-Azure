@@ -12,11 +12,11 @@ class TeamsConfig:
     redirect_uri: str
     token_cache_path: str
     token_cache_key: str
-    token_lock_url: str
     notification_url: str
     lifecycle_url: str
     client_state: str
     storage_account_connection_string: str
+    token_lock_url: str = ""
     graph_base: str = "https://graph.microsoft.com/v1.0"
 
     @property
@@ -40,7 +40,7 @@ class TeamsConfig:
             redirect_uri=req("TEAMS_REDIRECT_URI"),
             token_cache_path=req("TEAMS_TOKEN_CACHE_PATH"),
             token_cache_key=req("TEAMS_TOKEN_CACHE_KEY"),
-            token_lock_url=req("TEAMS_TOKEN_LOCK_URL"),
+            token_lock_url=os.environ.get("TEAMS_TOKEN_LOCK_URL", ""),
             notification_url=req("TEAMS_NOTIFICATION_URL"),
             lifecycle_url=req("TEAMS_LIFECYCLE_URL"),
             client_state=req("TEAMS_CLIENT_STATE"),

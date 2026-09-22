@@ -1,9 +1,10 @@
 import logging
+from pathlib import Path
 
 import msal
-import redis
 
 from teams_core.auth.cache import EncryptedTokenCache
+from teams_core.auth.lock import create_lock
 from teams_core.auth.scopes import SCOPES
 from teams_core.config import TeamsConfig
 
@@ -18,10 +19,11 @@ class MsalTokenProvider:
     def __init__(self, cfg: TeamsConfig) -> None:
         self._cfg = cfg
         self._cache = EncryptedTokenCache(cfg.token_cache_path, cfg.token_cache_key)
-        self._redis = redis.Redis.from_url(cfg.token_lock_url)
+        lock_file = Path(cfg.token_cache_path).with_suffix(".lock")
+        self._lock = create_lock(cfg.token_lock_url or None, lock_file)
 
     def get_token(self) -> str:
-        with self._redis.lock("teams:token:refresh", timeout=30, blocking_timeout=15):
+        with self._lock:
             token_cache = self._cache.load()
             app = msal.ConfidentialClientApplication(
                 client_id=self._cfg.client_id,

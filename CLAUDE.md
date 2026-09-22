@@ -14,7 +14,8 @@ teams_core/
   auth/
     scopes.py            # Delegated Graph scopes (10 scopes, includes Files.Read.All, Mail.ReadWrite, Mail.Send)
     cache.py             # EncryptedTokenCache (Fernet-encrypted MSAL cache at rest)
-    provider.py          # MsalTokenProvider (delegated auth with Redis lock for safe refresh)
+    lock.py              # TokenLock: FileTokenLock (default, single-process) + RedisTokenLock (optional, multi-process)
+    provider.py          # MsalTokenProvider (delegated auth, uses lock.create_lock for safe refresh)
   domain/
     models.py            # ConversationRef, Author, Mention, FileAttachment, DownloadedFile, BlobRef, OutboundMessage, InboundMessage, EmailAddress, EmailFileAttachment, OutboundEmail, InboundEmail, MailFolder
   adapters/
@@ -43,6 +44,7 @@ scripts/
 ## Key design decisions
 
 - **Delegated access model** (service account), not application-only. Graph has no app permission for normal message sending.
+- **Token refresh locking is pluggable**: a local file lock is used by default (single-process deployments); setting `TEAMS_TOKEN_LOCK_URL` switches to a Redis-backed distributed lock for multi-process/multi-host deployments. See `teams_core/auth/lock.py`.
 - **Auth flow**: Authorization code with confidential client. One interactive bootstrap, then silent refresh.
 - **HTTP**: `msal` + `httpx` (sync). Avoids `msgraph-sdk` which is async-only.
 - **Python 3.11+** required.
@@ -54,7 +56,7 @@ scripts/
 - `msal` - Microsoft Authentication Library
 - `httpx` - HTTP client
 - `cryptography` - Fernet encryption for token cache
-- `redis` - Distributed lock for token refresh
+- `redis` (optional, `pip install teams-core[redis]`) - Distributed lock for token refresh in multi-process deployments; not needed for single-process deployments (file lock is used instead)
 - `python-dotenv` - Loads `.env` automatically in `TeamsConfig.from_env()`
 - `azure-storage-blob` - Azure Blob Storage SDK for file upload/download
 
@@ -70,7 +72,7 @@ All required, loaded via `TeamsConfig.from_env()`:
 | `TEAMS_REDIRECT_URI` | OAuth callback (e.g. `http://localhost:8400/callback`) |
 | `TEAMS_TOKEN_CACHE_PATH` | File path for encrypted token cache |
 | `TEAMS_TOKEN_CACHE_KEY` | Fernet key (32 url-safe base64 bytes) |
-| `TEAMS_TOKEN_LOCK_URL` | Redis URL for refresh lock |
+| `TEAMS_TOKEN_LOCK_URL` | (optional) Redis URL for refresh lock; if unset, a local file lock is used instead (single-process only) |
 | `TEAMS_NOTIFICATION_URL` | Public HTTPS URL for Graph change notifications |
 | `TEAMS_LIFECYCLE_URL` | Public HTTPS URL for Graph lifecycle events |
 | `TEAMS_CLIENT_STATE` | Random secret echoed by Graph to verify notifications |
@@ -88,12 +90,16 @@ El sistema requiere que los pasos se ejecuten en este orden. Cada paso depende d
    Copiar .env.example a .env y completar todos los valores.
    Ver tabla "Environment variables" arriba.
 
-3. Levantar Redis (requerido por MsalTokenProvider)
+3. (Opcional) Levantar Redis, solo si hay múltiples procesos/hosts
    docker run -d -p 6379:6379 redis
-   El provider usa un lock distribuido en Redis para evitar que
-   múltiples procesos invaliden el refresh token al renovar
-   simultáneamente. Sin Redis corriendo, cualquier operación
-   que requiera un token falla con ConnectionError.
+   El provider usa un lock para evitar que múltiples procesos
+   invaliden el refresh token al renovar simultáneamente. Por
+   defecto usa un lock de archivo local (sin dependencias externas),
+   suficiente para despliegues de un solo proceso. Si se define
+   `TEAMS_TOKEN_LOCK_URL`, usa un lock distribuido en Redis en su
+   lugar (necesario si hay más de un proceso u host compartiendo
+   el mismo token cache). Instalar el extra con
+   `pip install -e ".[redis]"` en ese caso.
 
 4. Bootstrap de autenticación (una sola vez, interactivo)
    python -m scripts.bootstrap_auth
@@ -105,7 +111,8 @@ El sistema requiere que los pasos se ejecuten en este orden. Cada paso depende d
 
 5. El sistema está listo para operar
    A partir de aquí, MsalTokenProvider renueva el access token
-   silenciosamente usando el cache cifrado + el lock de Redis.
+   silenciosamente usando el cache cifrado + el lock (archivo local
+   o Redis, según `TEAMS_TOKEN_LOCK_URL`).
    GraphClient, GraphMessageSender y GraphMessageReader pueden
    instanciarse y usarse.
 ```
@@ -117,7 +124,8 @@ El sistema requiere que los pasos se ejecuten en este orden. Cada paso depende d
 # Install in dev mode
 pip install -e ".[dev]"
 
-# Levantar Redis (prerequisito)
+# (Optional) install Redis extra + start Redis, only for multi-process deployments
+pip install -e ".[redis]"
 docker run -d -p 6379:6379 redis
 
 # Bootstrap auth (run once, interactively, as the service account)
@@ -133,25 +141,25 @@ ruff check teams_core/ tests/
 # Type check
 mypy teams_core/
 
-# Smoke test: list chats and read messages (requires Redis + token cache)
+# Smoke test: list chats and read messages (requires token cache)
 python -m scripts.test_read
 
-# Smoke test: send a message (requires Redis + token cache)
+# Smoke test: send a message (requires token cache)
 python -m scripts.test_send
 
-# Polling test: auto-reply to new messages (requires Redis + token cache)
+# Polling test: auto-reply to new messages (requires token cache)
 python -m scripts.test_poll
 
-# File test: find and download attachments (requires Redis + token cache + Files.Read.All scope)
+# File test: find and download attachments (requires token cache + Files.Read.All scope)
 python -m scripts.test_file
 
 # Blob test: upload file to Azure Blob Storage (requires STORAGE_ACCOUNT_CONNECTION_STRING)
 python -m scripts.test_blob
 
-# Mail test: list folders and read inbox (requires Redis + token cache + Mail.ReadWrite)
+# Mail test: list folders and read inbox (requires token cache + Mail.ReadWrite)
 python -m scripts.test_mail_read
 
-# Mail test: send a test email (requires Redis + token cache + Mail.Send)
+# Mail test: send a test email (requires token cache + Mail.Send)
 python -m scripts.test_mail_send
 ```
 
@@ -162,7 +170,7 @@ python -m scripts.test_mail_send
 - Stick to safe HTML tags: `<b>`, `<i>`, `<a>`, `<br>`, `<ul>`, `<code>`, `<blockquote>`.
 - Change notifications are not guaranteed delivery; always have a backfill path via `history()`.
 - Org limit: 10,000 total Teams change-notification subscriptions.
-- Token refresh uses a Redis lock. Multiple processes refreshing without locking can invalidate each other's tokens permanently.
+- Token refresh uses a lock (file-based by default, Redis for multi-process). Multiple processes refreshing without locking can invalidate each other's tokens permanently.
 - `ReauthRequired` should trigger an alert; refresh tokens can silently expire.
 
 ## Items to verify per tenant

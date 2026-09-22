@@ -18,11 +18,7 @@ class GraphEmailReader:
     def list_messages(
         self, *, folder_id: str | None = None, limit: int = 25
     ) -> Sequence[InboundEmail]:
-        path = (
-            f"/me/mailFolders/{folder_id}/messages"
-            if folder_id
-            else "/me/messages"
-        )
+        path = f"/me/mailFolders/{folder_id or 'Inbox'}/messages"
         params = {
             "$top": min(limit, 50),
             "$orderby": "receivedDateTime desc",
