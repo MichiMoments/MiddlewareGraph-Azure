@@ -11,17 +11,20 @@ dependencies = [
     "msal>=1.28",
     "httpx>=0.27",
     "cryptography>=42.0",
-    "redis>=5.0",
     "python-dotenv>=1.0",
     "azure-storage-blob>=12.19",
 ]
 
 [project.optional-dependencies]
+redis = [
+    "redis>=5.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov",
     "ruff",
     "mypy",
+    "redis>=5.0",
 ]
 
 [tool.ruff]
